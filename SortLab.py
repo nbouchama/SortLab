@@ -5,6 +5,7 @@ Lancement avec Python 3.8 ou ultérieur. L’interface repose sur les composants
 classiques de Tkinter et ttk.
 """
 import csv
+import colorsys
 import math
 import operator
 import random
@@ -679,6 +680,19 @@ class App:
         self.race_canvas_b = tk.Canvas(canvases, height=120, background="white", highlightthickness=1, highlightbackground="#B8C0CC")
         self.race_canvas_a.pack(side="left", fill="both", expand=True, padx=(0, 4))
         self.race_canvas_b.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        self.race_finish = ttk.LabelFrame(race_box, text="Arrivée", padding=6)
+        self.race_finish_title = tk.StringVar(value="")
+        ttk.Label(self.race_finish, textvariable=self.race_finish_title,
+                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w", pady=(0, 4))
+        finish_rows = ttk.Frame(self.race_finish)
+        finish_rows.pack(fill="x")
+        self.race_lapin_text = tk.StringVar(value="")
+        self.race_tortue_text = tk.StringVar(value="")
+        ttk.Label(finish_rows, textvariable=self.race_lapin_text,
+                  font=("TkDefaultFont", 10, "bold"), foreground="#B45309").pack(side="left", expand=True, anchor="w")
+        ttk.Label(finish_rows, textvariable=self.race_tortue_text,
+                  font=("TkDefaultFont", 10, "bold"), foreground="#15803D").pack(side="left", expand=True, anchor="w")
+        self.race_finish.pack_forget()
 
     def _build_complexity(self):
         controls = ttk.Frame(self.tab_complexity)
@@ -819,80 +833,139 @@ class App:
         self._reset_run()
         self.draw_bars()
 
-    def draw_bars(self, canvas=None, values=None, highlight=(), title=None):
+    @staticmethod
+    def _mix_color(first, second, amount):
+        a = tuple(int(first[i:i + 2], 16) for i in (1, 3, 5))
+        b = tuple(int(second[i:i + 2], 16) for i in (1, 3, 5))
+        return "#" + "".join(f"{round(a[k] + (b[k] - a[k]) * amount):02x}" for k in range(3))
+
+    @staticmethod
+    def _value_color(fraction):
+        red, green, blue = colorsys.hsv_to_rgb(.75 * (1 - fraction), .72, .95)
+        return f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
+
+    def _draw_ball(self, canvas, cx, cy, diameter, color, value, slot,
+                   halo=False, halo_color="#B93A32", sorted_node=False):
+        """Render the glossy sphere and highlights used by the original animation."""
+        half = diameter / 2
+        base = cy + half
+        canvas.create_oval(cx - diameter * .44, base - 2, cx + diameter * .44, base + 7,
+                           fill="#E7EBF3", outline="")
+        if halo:
+            canvas.create_oval(cx - half - 6, cy - half - 6, cx + half + 6, cy + half + 6,
+                               fill=self._mix_color(halo_color, "#FFFFFF", .82),
+                               outline=halo_color, width=2)
+        canvas.create_oval(cx - half, cy - half, cx + half, cy + half,
+                           fill=self._mix_color(color, "#000000", .14), outline="")
+        canvas.create_oval(cx - half + 1, cy - half + 1, cx + half - 3, cy + half - 3,
+                           fill=color, outline="")
+        if sorted_node:
+            canvas.create_oval(cx - half - 2, cy - half - 2, cx + half + 2, cy + half + 2,
+                               outline="#16A34A", width=2)
+        if diameter > 12:
+            highlight_radius = diameter * .15
+            hx, hy = cx - diameter * .19, cy - diameter * .24
+            canvas.create_oval(hx - highlight_radius * 1.4, hy - highlight_radius,
+                               hx + highlight_radius * 1.4, hy + highlight_radius,
+                               fill=self._mix_color(color, "#FFFFFF", .55), outline="")
+            canvas.create_oval(hx - highlight_radius * .6, hy - highlight_radius * .45,
+                               hx + highlight_radius * .6, hy + highlight_radius * .45,
+                               fill=self._mix_color(color, "#FFFFFF", .85), outline="")
+        if slot > 22 and diameter > 18:
+            luminance = sum(int(color[i:i + 2], 16) * weight for i, weight in zip((1, 3, 5), (.299, .587, .114)))
+            text_color = "#FFFFFF" if luminance < 150 else "#172033"
+            canvas.create_text(cx, cy + diameter * .05, text=str(value),
+                               font=("TkDefaultFont", max(7, min(11, int(diameter / 3))), "bold"),
+                               fill=text_color)
+
+    def draw_bars(self, canvas=None, values=None, highlight=(), title=None,
+                  stats=None, tout_trie=None, type_op=None):
+        """Draw either original-style glossy balls or standard rectangles."""
         canvas = canvas or self.canvas
         values = self.values if values is None else values
         canvas.delete("all")
-        w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 100)
-        margin, top, bottom = 24, (30 if title else 18), 28
-        if title:
-            canvas.create_text(10, 8, anchor="nw", text=title, font=("TkDefaultFont", 9, "bold"))
+        width, height = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 120)
+        main_canvas = canvas is self.canvas
+        margin = 24
         n = len(values)
         if not n:
             return
         lo, hi = min(values), max(values)
         span = max(1, hi - lo)
-        slot = (w - 2 * margin) / n
-        usable = max(36, h - top - bottom)
-        max_d = max(8, min(slot * .94, usable * .90, 112))
-        baseline = h - bottom
+        slot = (width - 2 * margin) / n
+        base = height - 62
+        dmax = max(20, min(slot * .94, base - 70, 112))
+        stats = stats or (self.stats if main_canvas else None)
+        moves = stats.pos_mv if stats is not None and len(stats.pos_mv) == n else [0] * n
+        max_moves = max(moves) if moves else 0
+        if tout_trie is None:
+            tout_trie = main_canvas and not self.running and values == sorted(values)
 
-        def blend(first, second, amount):
-            a = tuple(int(first[i:i + 2], 16) for i in (1, 3, 5))
-            b = tuple(int(second[i:i + 2], 16) for i in (1, 3, 5))
-            return "#" + "".join(f"{round(a[k] + (b[k] - a[k]) * amount):02x}" for k in range(3))
+        if main_canvas:
+            canvas.create_rectangle(1, 1, width - 1, height - 1, fill="#FBFCFE", outline="#CBD5E1")
+            legend = (("Comparaison", "#B93A32"), ("Échange / écriture", "#D98314"), ("Trié", "#16A34A"))
+            x = 16
+            for label, color in legend:
+                canvas.create_oval(x, 13, x + 9, 22, fill=color, outline="")
+                canvas.create_text(x + 14, 18, text=label, anchor="w", font=("TkDefaultFont", 8), fill="#475467")
+                x += 112 if label != "Échange / écriture" else 144
+            canvas.create_text(width - 14, 18, anchor="e", text=f"{self.algorithm.get()} · {n} valeurs",
+                               font=("TkDefaultFont", 8, "bold"), fill="#475467")
+        elif title:
+            canvas.create_text(10, 8, anchor="nw", text=title, font=("TkDefaultFont", 9, "bold"))
 
+        def diameter(fraction):
+            return max(8, min(slot * (.50 + .48 * fraction), dmax * (.48 + .52 * fraction)))
+
+        current_op = self.last_op if main_canvas else type_op
+        operation_color = "#B93A32" if current_op == "cmp" else "#D98314"
         for i, value in enumerate(values):
             fraction = (value - lo) / span
-            active = i in highlight and canvas is self.canvas
-            color = ("#DC2626" if self.last_op == "cmp" else "#D97706") if active else blend("#2563EB", "#0F9F9A", fraction)
-            cx = margin + (i + .5) * slot
-
+            cx = margin + slot * (i + .5)
+            color = self._value_color(fraction)
+            active = i in highlight
             if self.shape_mode.get() == "Boules":
-                diameter = max(8, max_d * (.48 + .52 * fraction))
-                radius = diameter / 2
-                cy = baseline - radius - 5
-                # Soft contact shadow, shaded body, and two specular highlights
-                # create a polished sphere without external image assets.
-                canvas.create_oval(cx - radius * .78 + 2, baseline - 8,
-                                   cx + radius * .78 + 3, baseline - 1,
-                                   fill="#D7DEE8", outline="")
-                canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
-                                   fill=blend(color, "#102A56", .48), outline="#173B70", width=1)
-                inset = max(1, radius * .09)
-                canvas.create_oval(cx - radius + inset, cy - radius + inset,
-                                   cx + radius - inset, cy + radius - inset,
-                                   fill=color, outline="")
-                shade_top = cy + radius * .32
-                canvas.create_oval(cx - radius * .78, shade_top,
-                                   cx + radius * .78, cy + radius * .82,
-                                   fill=blend(color, "#102A56", .34), outline="")
-                if diameter >= 12:
-                    gloss = blend(color, "#FFFFFF", .68)
-                    canvas.create_oval(cx - radius * .62, cy - radius * .62,
-                                       cx - radius * .02, cy - radius * .28,
-                                       fill=gloss, outline="")
-                    canvas.create_oval(cx - radius * .49, cy - radius * .57,
-                                       cx - radius * .28, cy - radius * .43,
-                                       fill="#FFFFFF", outline="")
-                if n <= 35 and diameter >= 20:
-                    canvas.create_text(cx, cy + 1, text=str(value),
-                                       font=("TkDefaultFont", max(7, min(10, int(diameter * .28))), "bold"),
-                                       fill="#FFFFFF")
+                size = diameter(fraction)
+                self._draw_ball(canvas, cx, base - size / 2, size, color, value, slot,
+                                halo=active, halo_color=operation_color, sorted_node=bool(tout_trie))
             else:
-                bar_w = max(2, min(30, slot * .76))
-                bar_h = 8 + fraction * max(8, usable - 18)
-                x0 = cx - bar_w / 2
-                y0 = baseline - bar_h
-                canvas.create_rectangle(x0 + 2, y0 + 3, x0 + bar_w + 2, baseline + 1,
-                                        fill="#D7DEE8", outline="")
-                canvas.create_rectangle(x0, y0, x0 + bar_w, baseline,
-                                        fill=blend(color, "#102A56", .16), outline="#1E40AF", width=1)
-                if bar_w >= 6:
-                    canvas.create_line(x0 + 2, y0 + 2, x0 + bar_w - 2, y0 + 2,
-                                       fill=blend(color, "#FFFFFF", .58), width=1)
+                bar_width = max(2, min(30, slot * .76))
+                bar_height = 12 + fraction * max(12, base - 104)
+                x0, y0 = cx - bar_width / 2, base - bar_height
+                fill = operation_color if active else color
+                canvas.create_rectangle(x0 + 2, y0 + 3, x0 + bar_width + 2, base + 1,
+                                        fill="#E7EBF3", outline="")
+                canvas.create_rectangle(x0, y0, x0 + bar_width, base,
+                                        fill=self._mix_color(fill, "#000000", .12), outline="")
+                if tout_trie:
+                    canvas.create_rectangle(x0 - 2, y0 - 2, x0 + bar_width + 2, base + 1,
+                                            outline="#16A34A", width=2)
                 if n <= 35:
-                    canvas.create_text(cx, y0 - 8, text=str(value), font=("TkDefaultFont", 8))
+                    canvas.create_text(cx, y0 - 8, text=str(value), font=("TkDefaultFont", 8), fill="#344054")
+
+            heat = moves[i] / max_moves if max_moves else 0
+            heat_color = self._mix_color("#FFFFFF", "#EA580C", heat ** .7 if heat else 0)
+            strip_left = margin + slot * i + 1
+            strip_right = margin + slot * (i + 1) - 1
+            canvas.create_rectangle(strip_left, base + 10, strip_right, base + 19,
+                                    fill=heat_color, outline="#CBD5E1" if heat < .05 else "")
+            if slot > 26:
+                canvas.create_text(cx, base + 31, text=str(i + 1), font=("TkDefaultFont", 7), fill="#667085")
+
+        if len(highlight) == 2 and current_op in ("cmp", "swap"):
+            tops = []
+            points = []
+            for index in highlight:
+                fraction = (values[index] - lo) / span
+                if self.shape_mode.get() == "Boules":
+                    tops.append(base - diameter(fraction))
+                else:
+                    tops.append(base - (12 + fraction * max(12, base - 104)))
+                points.append((margin + slot * (index + .5), tops[-1] - 8))
+            y_top = max(30, min(tops) - 18)
+            canvas.create_line(points[0][0], points[0][1], points[0][0], y_top,
+                               points[1][0], y_top, points[1][0], points[1][1],
+                               fill=operation_color, width=2, capstyle="round", joinstyle="round")
 
     def _index_at(self, x, canvas=None, n=None):
         canvas = canvas or self.canvas
@@ -1235,9 +1308,11 @@ class App:
         if self.race_timer is not None:
             self.root.after_cancel(self.race_timer)
             self.race_timer = None
+        self.race_finish.pack_forget()
+        self.race_status.set("🐇 Le Lapin et 🐢 la Tortue prennent le départ…")
         self.race = {
-            "a": {"name": self.race_a.get(), "values": self.initial[:], "gen": None, "stats": Stats(len(self.initial)), "done": False},
-            "b": {"name": self.race_b.get(), "values": self.initial[:], "gen": None, "stats": Stats(len(self.initial)), "done": False},
+            "a": {"name": self.race_a.get(), "values": self.initial[:], "gen": None, "stats": Stats(len(self.initial)), "done": False, "last_idx": (), "last_op": None},
+            "b": {"name": self.race_b.get(), "values": self.initial[:], "gen": None, "stats": Stats(len(self.initial)), "done": False, "last_idx": (), "last_op": None},
         }
         for side in ("a", "b"):
             run = self.race[side]
@@ -1258,12 +1333,26 @@ class App:
                     op, idx, extra = next(run["gen"])
                     if op != "info":
                         run["stats"].add(op, idx)
+                        run["last_idx"], run["last_op"] = idx, op
                 except StopIteration:
                     run["done"] = True
-            self.draw_bars(canvas, run["values"], title=f"{run['name']} — {run['stats'].cmp} comparaisons")
+            mascot = "🐇 Lapin" if side == "a" else "🐢 Tortue"
+            self.draw_bars(canvas, run["values"], highlight=run["last_idx"],
+                           title=f"{mascot} · {run['name']} — {run['stats'].cmp} comparaisons",
+                           stats=run["stats"], tout_trie=run["done"], type_op=run["last_op"])
         a, b = self.race["a"], self.race["b"]
         if a["done"] and b["done"]:
-            self.race_status.set(f"Terminé — {a['stats'].cmp} contre {b['stats'].cmp} comparaisons")
+            if a["stats"].etapes < b["stats"].etapes:
+                verdict = f"🏆 Le Lapin gagne avec {a['stats'].etapes} opérations."
+            elif b["stats"].etapes < a["stats"].etapes:
+                verdict = f"🏆 La Tortue gagne avec {b['stats'].etapes} opérations."
+            else:
+                verdict = f"🤝 Égalité : {a['stats'].etapes} opérations chacun."
+            self.race_status.set("Course terminée")
+            self.race_finish_title.set(verdict)
+            self.race_lapin_text.set(f"🐇 Lapin · {a['name']}\n{a['stats'].cmp} comparaisons · {a['stats'].etapes} opérations")
+            self.race_tortue_text.set(f"🐢 Tortue · {b['name']}\n{b['stats'].cmp} comparaisons · {b['stats'].etapes} opérations")
+            self.race_finish.pack(fill="x", pady=(6, 0))
         else:
             self.race_status.set("Course en cours…")
             self.race_timer = self.root.after(max(1, 250 // speed), self._race_tick)
@@ -1277,3 +1366,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
